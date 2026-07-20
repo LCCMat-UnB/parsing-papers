@@ -39,3 +39,18 @@ def test_schema_error_falls_back_to_json_object():
         out = ext.complete([{"role": "user", "content": "oi"}])
     assert '"records"' in out
     assert [c["type"] for c in calls] == ["json_schema", "json_object"]
+
+
+def test_complete_accepts_custom_json_schema():
+    ext = _extractor()
+    seen = []
+
+    def fake_completion(**kwargs):
+        seen.append(kwargs["response_format"])
+        return {"choices": [{"message": {"content": '{"decisions": []}'}}]}
+
+    with patch("litellm.completion", side_effect=fake_completion):
+        out = ext.complete([{"role": "user", "content": "oi"}], json_schema={"type": "object"}, schema_name="arbiter_decision")
+    assert '"decisions"' in out
+    assert seen[0]["json_schema"]["name"] == "arbiter_decision"
+    assert seen[0]["json_schema"]["schema"] == {"type": "object"}

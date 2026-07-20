@@ -99,7 +99,7 @@ class LLMExtractor:
         self.min_num_ctx = min_num_ctx
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=30), reraise=True)
-    def _call(self, messages: list[dict]) -> str:
+    def _call(self, messages: list[dict], json_schema: dict | None = None, schema_name: str = "paper_extraction") -> str:
         import litellm
 
         # estimativa grosseira de tokens do prompt (~4 chars/token em ingles/
@@ -128,12 +128,16 @@ class LLMExtractor:
         # Tenta forcar JSON schema estrito; so cai no fallback json_object
         # quando o erro indica falta de suporte a schema (ver
         # _is_schema_unsupported_error) -- demais erros propagam para o retry.
+        # json_schema=None (default) mantem o comportamento original: schema de
+        # PaperExtraction. Chamadores fora do fluxo de extracao (arbitro) passam
+        # seu proprio schema+nome para nao ter a resposta forcada ao formato
+        # PaperExtraction por provedores que honram json_schema estrito.
         try:
             kwargs["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
-                    "name": "paper_extraction",
-                    "schema": PaperExtraction.model_json_schema(),
+                    "name": schema_name,
+                    "schema": json_schema if json_schema is not None else PaperExtraction.model_json_schema(),
                     "strict": True,
                 },
             }
@@ -147,10 +151,14 @@ class LLMExtractor:
 
         return resp["choices"][0]["message"]["content"]
 
-    def complete(self, messages: list[dict]) -> str:
+    def complete(self, messages: list[dict], json_schema: dict | None = None, schema_name: str = "paper_extraction") -> str:
         """Chamada generica (com retry) fora do fluxo de extracao -- usada pelo
-        arbitro (arbiter.py) com seus proprios prompts e schema de resposta."""
-        return self._call(messages)
+        arbitro (arbiter.py) com seus proprios prompts e schema de resposta.
+
+        json_schema/schema_name permitem ao chamador forcar um schema de
+        resposta proprio (ex: ArbiterRecordDecision); com os defaults, usa
+        PaperExtraction.model_json_schema() -- comportamento original."""
+        return self._call(messages, json_schema=json_schema, schema_name=schema_name)
 
     def extract(self, paper_id: str, source_text: str) -> PaperExtraction:
         messages = build_messages(paper_id=paper_id, source_text=source_text)
