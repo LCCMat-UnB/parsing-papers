@@ -1,0 +1,39 @@
+services:
+  grobid:
+    image: lfoppiano/grobid:0.8.1
+    container_name: parsing_papers_grobid
+    ports:
+      - "8070:8070"
+    environment:
+      # A imagem do GROBID (Gradle "application" plugin) le a variavel
+      # GROBID_SERVICE_OPTS para as flags da JVM -- JAVA_OPTS e ignorada por
+      # ela, por isso nao tinha efeito nenhum antes.
+      # -XX:-UseContainerSupport desliga a deteccao de cgroup pela JVM, que e
+      # o codigo que quebra com "NullPointerException: Cannot invoke
+      # CgroupInfo.getMountPoint()" nos cgroups expostos pelo Docker Desktop
+      # no WSL2.
+      - GROBID_SERVICE_OPTS=-Xmx4g -XX:-UseContainerSupport
+    deploy:
+      resources:
+        limits:
+          memory: 6G
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: parsing_papers_ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  ollama_data:

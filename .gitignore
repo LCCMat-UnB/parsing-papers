@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+data/pdfs/*
+!data/pdfs/.gitkeep
+data/grobid_tei/*
+!data/grobid_tei/.gitkeep
+data/extracted/*
+!data/extracted/.gitkeep
+data/audit/*
+!data/audit/.gitkeep
+.env
+*.egg-info/
+.venv/
+.superpowers/
+debug_llm_raw.py

@@ -1,0 +1,27 @@
+# Cliente GROBID / parsing XML TEI
+requests>=2.31.0
+lxml>=5.2.0
+
+# LLM abstraction layer (Ollama local + APIs externas se necessario)
+litellm>=1.44.0
+
+# Schema / validacao
+pydantic>=2.7.0
+
+# Fuzzy matching para verificacao de citacoes
+rapidfuzz>=3.9.0
+
+# Planilhas
+openpyxl>=3.1.2
+pandas>=2.2.0
+
+# CLI e utilitarios
+click>=8.1.7
+tqdm>=4.66.0
+python-dotenv>=1.0.1
+tenacity>=8.3.0
+
+# Menu interativo (cli.py) e diagnostico de ambiente (doctor.py) -- mesma lib
+# usada pelo pontodoi, para manter a mesma linguagem visual entre os 3 CLIs
+# da pipeline (SPE + pontodoi + parsing-papers).
+rich>=13.7.0

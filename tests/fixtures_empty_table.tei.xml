@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xmlns="http://www.tei-c.org/ns/1.0">
+  <teiHeader>
+    <fileDesc>
+      <titleStmt>
+        <title level="a" type="main">Paper with a malformed table</title>
+      </titleStmt>
+    </fileDesc>
+    <profileDesc>
+      <abstract>
+        <p>Abstract mentioning the model briefly.</p>
+      </abstract>
+    </profileDesc>
+  </teiHeader>
+  <text xml:lang="en">
+    <body>
+      <div>
+        <head>Results</head>
+        <p>The XGBoost model achieved an AUC of 0.93 on the held-out set, as reported in the discussion below Table 4.</p>
+      </div>
+      <figure type="table">
+        <label>4</label>
+        <head>Table 4</head>
+        <table>
+          <row><cell>Importance ranking</cell></row>
+        </table>
+      </figure>
+      <figure type="table">
+        <label>5</label>
+        <head>Table 5</head>
+      </figure>
+    </body>
+  </text>
+</TEI>

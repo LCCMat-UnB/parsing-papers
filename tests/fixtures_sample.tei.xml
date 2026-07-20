@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TEI xmlns="http://www.tei-c.org/ns/1.0">
+  <teiHeader>
+    <fileDesc>
+      <titleStmt>
+        <title level="a" type="main">Credit risk prediction for cotton farmers using machine learning</title>
+      </titleStmt>
+    </fileDesc>
+    <profileDesc>
+      <abstract>
+        <p>This study compares Random Forest and Logistic Regression for predicting default risk among cotton farmers using a sample of 1200 farmers.</p>
+      </abstract>
+    </profileDesc>
+  </teiHeader>
+  <text xml:lang="en">
+    <body>
+      <div>
+        <head>Methods</head>
+        <p>We used a Random Forest classifier and a Logistic Regression baseline, trained on financial and productive variables including income, credit history, and planted area.</p>
+      </div>
+      <div>
+        <head>Results</head>
+        <p>The Random Forest model achieved an AUC of 0.87 on the test set, using a sample of 1200 farmers from the southern region. The logistic regression baseline achieved an AUC of 0.79.</p>
+      </div>
+      <figure type="table">
+        <label>Table 1</label>
+        <head>Model performance</head>
+        <table>
+          <row><cell>Model</cell><cell>AUC</cell><cell>Accuracy</cell></row>
+          <row><cell>Random Forest</cell><cell>0.87</cell><cell>0.81</cell></row>
+          <row><cell>Logistic Regression</cell><cell>0.79</cell><cell>0.75</cell></row>
+        </table>
+      </figure>
+    </body>
+  </text>
+</TEI>
