@@ -40,6 +40,22 @@ class ExtractionError(Exception):
     pass
 
 
+# Padroes de erro que indicam que o provedor nao suporta response_format
+# json_schema -- somente NESSES casos vale tentar o fallback json_object.
+# Qualquer outro erro (timeout, conexao, 5xx) deve propagar para o retry do
+# tenacity; antes, o catch-all mascarava ate timeout como "schema nao
+# suportado" e queimava uma chamada extra por tentativa.
+_SCHEMA_UNSUPPORTED_HINTS = (
+    "response_format", "json_schema", "json schema", "schema",
+    "structured output", "unsupported parameter", "unknown field",
+)
+
+
+def _is_schema_unsupported_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(hint in msg for hint in _SCHEMA_UNSUPPORTED_HINTS)
+
+
 class LLMExtractor:
     """
     Wrapper fino sobre litellm.completion.
@@ -82,7 +98,7 @@ class LLMExtractor:
         # dizendo ter tido sucesso).
         self.min_num_ctx = min_num_ctx
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=30))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=30), reraise=True)
     def _call(self, messages: list[dict]) -> str:
         import litellm
 
@@ -109,8 +125,9 @@ class LLMExtractor:
             kwargs["num_ctx"] = num_ctx
             logger.debug("Ollama num_ctx=%d (prompt estimado em ~%d tokens)", num_ctx, estimated_prompt_tokens)
 
-        # Tenta forcar JSON schema estrito; se o provedor nao suportar,
-        # litellm ignora ou levanta -- cai no fallback abaixo.
+        # Tenta forcar JSON schema estrito; so cai no fallback json_object
+        # quando o erro indica falta de suporte a schema (ver
+        # _is_schema_unsupported_error) -- demais erros propagam para o retry.
         try:
             kwargs["response_format"] = {
                 "type": "json_schema",
@@ -122,11 +139,18 @@ class LLMExtractor:
             }
             resp = litellm.completion(**kwargs)
         except Exception as e:  # noqa: BLE001
-            logger.warning("json_schema estrito falhou (%s); tentando response_format=json_object", e)
+            if not _is_schema_unsupported_error(e):
+                raise
+            logger.warning("json_schema estrito nao suportado (%s); tentando response_format=json_object", e)
             kwargs["response_format"] = {"type": "json_object"}
             resp = litellm.completion(**kwargs)
 
         return resp["choices"][0]["message"]["content"]
+
+    def complete(self, messages: list[dict]) -> str:
+        """Chamada generica (com retry) fora do fluxo de extracao -- usada pelo
+        arbitro (arbiter.py) com seus proprios prompts e schema de resposta."""
+        return self._call(messages)
 
     def extract(self, paper_id: str, source_text: str) -> PaperExtraction:
         messages = build_messages(paper_id=paper_id, source_text=source_text)
