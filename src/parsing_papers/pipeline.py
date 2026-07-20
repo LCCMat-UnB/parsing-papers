@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from pathlib import Path
 
@@ -422,7 +423,7 @@ def build_final_outputs(checkpoints: list[dict], out_dir: Path) -> tuple[Path, P
         # nao por posicao na lista de comparacoes -- comparacoes de registros
         # "so em B" (index_a=None) nao correspondem a nenhuma linha de A e
         # ficam de fora deste dict (elas nao aparecem na planilha hoje, pois
-        # a planilha e construida a partir de extraction_a; ficam registradas
+        # a planilha e construida a partir de extraction_reconciled (que preserva a ordem/contagem dos records de A); ficam registradas
         # no checkpoint JSON bruto para quem quiser auditar manualmente).
         dual_comparisons_by_paper[paper_id] = {
             comp["index_a"]: comp for comp in c["comparisons"] if comp["index_a"] is not None
@@ -443,6 +444,25 @@ def build_final_outputs(checkpoints: list[dict], out_dir: Path) -> tuple[Path, P
     audit_df.to_csv(audit_csv, index=False, encoding="utf-8-sig")
 
     return xlsx_path, csv_path, audit_xlsx, audit_csv
+
+
+def _process_all(pdfs: list[Path], process_fn, max_concurrency: int) -> list:
+    """
+    Roda process_fn sobre os PDFs. max_concurrency>1 usa pool de threads:
+    as chamadas LLM/GROBID sao HTTP bloqueante (I/O-bound), entao threads
+    bastam -- o GIL nao e gargalo e o batching do lado do servidor (vLLM)
+    resolve a GPU. O resultado sai em ordem de conclusao; nao importa, pois
+    load_checkpoints rele os arquivos do disco em ordem alfabetica.
+    """
+    if max_concurrency <= 1:
+        return [process_fn(p) for p in tqdm(pdfs, desc="Processando papers")]
+
+    results = []
+    with ThreadPoolExecutor(max_workers=max_concurrency) as pool:
+        futures = [pool.submit(process_fn, p) for p in pdfs]
+        for fut in tqdm(as_completed(futures), total=len(futures), desc="Processando papers"):
+            results.append(fut.result())
+    return results
 
 
 def process_pdf_directory(
@@ -527,11 +547,7 @@ def process_pdf_directory(
             logger.exception("Erro nao tratado processando %s -- pulando para o proximo.", pdf_path.name)
             return {"paper_id": pdf_path.stem, "result": None, "error": True}
 
-    processed = []
-    for pdf_path in tqdm(pdfs, desc="Processando papers"):
-        processed.append(_process(pdf_path))
-
-    return processed
+    return _process_all(pdfs, _process, profile.max_concurrency)
 
 
 def _resolve_profile(
