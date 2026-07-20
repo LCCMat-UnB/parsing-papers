@@ -747,5 +747,62 @@ def consolidate(out_dir):
         logger.info("Planilha de triagem PRISMA: %s / %s", screening_xlsx, screening_csv)
 
 
+def _summarize_checkpoint(c: dict) -> dict:
+    """Metricas de um checkpoint para o compare. Le campos novos com .get e
+    cai no fallback para checkpoints legados (pre-janelas/arbitro)."""
+    reconciled = c.get("extraction_reconciled") or c.get("extraction_a") or {}
+    return {
+        "records": len(reconciled.get("records", [])),
+        "prompt_tokens": c.get("estimated_prompt_tokens") or (c.get("source_text_len", 0) // 3),
+        "fallback_level": c.get("fallback_level", 0),
+        "divergent_fields": sum(
+            1 for comp in c.get("comparisons", []) for d in comp.get("divergences", []) if d.get("diverges")
+        ),
+        "unmatched": sum(1 for comp in c.get("comparisons", []) if comp.get("index_b") is None),
+        "arbiter_resolved": len(c.get("arbiter_resolutions", [])),
+        "total_s": (c.get("timing") or {}).get("total_s"),
+    }
+
+
+def build_compare_report(run_a_dir: Path, run_b_dir: Path) -> pd.DataFrame:
+    """Compara os checkpoints de duas rodadas (ex: baseline full-text vs
+    janelas+arbitro). Linhas = papers (uniao); colunas com sufixo _a/_b."""
+    run_a = {c["paper_id"]: _summarize_checkpoint(c) for c in load_checkpoints(Path(run_a_dir) / "checkpoints")}
+    run_b = {c["paper_id"]: _summarize_checkpoint(c) for c in load_checkpoints(Path(run_b_dir) / "checkpoints")}
+    keys = ("records", "prompt_tokens", "fallback_level", "divergent_fields", "unmatched", "arbiter_resolved", "total_s")
+    rows = []
+    for paper_id in sorted(set(run_a) | set(run_b)):
+        row = {"paper_id": paper_id}
+        for suffix, data in (("_a", run_a.get(paper_id)), ("_b", run_b.get(paper_id))):
+            for key in keys:
+                row[f"{key}{suffix}"] = data[key] if data else None
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+@cli.command()
+@click.option("--run-a", required=True, type=click.Path(exists=True, file_okay=False), help="Out-dir da rodada baseline (ex: full-text).")
+@click.option("--run-b", required=True, type=click.Path(exists=True, file_okay=False), help="Out-dir da rodada nova (ex: janelas).")
+@click.option("--csv", "csv_path", default=None, type=click.Path(file_okay=False), help="Opcional: salva o relatorio em CSV.")
+def compare(run_a, run_b, csv_path):
+    """Compara duas rodadas lado a lado: tokens, registros, divergencias, arbitro, tempo.
+
+    Uso tipico (benchmark sem gabarito -- ver spec):
+      python -m parsing_papers.pipeline compare --run-a data/extracted --run-b data/extracted_novo
+    """
+    df = build_compare_report(Path(run_a), Path(run_b))
+    if df.empty:
+        logger.warning("Nenhum checkpoint encontrado nas duas pastas.")
+        return
+    with pd.option_context("display.max_columns", None, "display.width", 220):
+        print(df.to_string(index=False))
+    numeric = df.drop(columns=["paper_id"]).apply(pd.to_numeric, errors="coerce")
+    print("\nMedias:")
+    print(numeric.mean().round(2).to_string())
+    if csv_path:
+        df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+        logger.info("Relatorio salvo em %s", csv_path)
+
+
 if __name__ == "__main__":
     cli()
