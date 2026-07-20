@@ -20,6 +20,7 @@ from pathlib import Path
 import typer
 
 from . import doctor, ui
+from . import init_cmd
 from .pipeline import (
     build_final_outputs,
     export_screening_outputs,
@@ -41,6 +42,37 @@ app = typer.Typer(
 
 # ============================================================ subcomandos ===
 
+@app.command(name="init")
+def init_cmd_run(
+    force: bool = typer.Option(False, "--force", help="Sobrescreve arquivos ja existentes."),
+):
+    """Cria docker-compose.yml e config/profiles/*.json no diretorio atual.
+
+    Necessario para quem instalou via `pip install git+https://...` -- o pip
+    so traz o codigo Python, nao o resto do repositorio. Rode este comando
+    numa pasta vazia (ou que sera a raiz do seu projeto) antes de
+    `docker compose up -d`.
+    """
+    destino = Path.cwd()
+    escritos, pulados = init_cmd.inicializar(destino, force=force)
+
+    if escritos:
+        ui.ok("Arquivos criados:")
+        for rel in escritos:
+            ui.console.print(f"  [primaria]{rel}[/]")
+    if pulados:
+        ui.aviso("Ja existiam (nao sobrescritos -- use --force para substituir):")
+        for rel in pulados:
+            ui.console.print(f"  [suave]{rel}[/]")
+    if not escritos and not pulados:
+        ui.info("Nada a fazer.")
+
+    if escritos or pulados:
+        ui.console.print()
+        ui.dica("Proximo passo: [primaria]docker compose up -d[/] (sobe GROBID + Ollama).")
+        ui.dica("Depois: [primaria]parsing-papers doctor[/] para conferir se esta tudo pronto.")
+
+
 @app.command(name="doctor")
 def doctor_cmd(
     grobid_url: str = typer.Option(doctor.DEFAULT_GROBID_URL, "--grobid-url"),
@@ -49,23 +81,38 @@ def doctor_cmd(
     profile_name: str = typer.Option("local", "--profile", help="Perfil a diagnosticar (local | cluster)."),
 ):
     """Verifica se o ambiente do perfil esta pronto (Docker/GROBID/Ollama no local; endpoint vLLM no cluster)."""
+    # Default "local" (usuario nao passou --profile) nao precisa de
+    # load_profile aqui -- a checagem "Arquivos locais (compose/perfis)"
+    # dentro de _rodar_diagnostico ja cobre a ausencia de config/profiles/ de
+    # forma nao-fatal (tabela, com o comando de correcao), em vez de abortar
+    # com FileNotFoundError cru antes de mostrar qualquer diagnostico --
+    # cenario comum para quem instalou via `pip install git+...` e ainda nao
+    # rodou `parsing-papers init`. Qualquer --profile explicito (incluindo
+    # typos, ou "local" digitado a mao) continua validado via load_profile,
+    # para nao mascarar erro de digitacao como se fosse "local" silencioso.
+    if profile_name == "local":
+        _rodar_diagnostico(grobid_url, ollama_url, modelo)
+        return
+
     from .profiles import load_profile
 
     try:
         profile = load_profile(profile_name)
     except (FileNotFoundError, ValueError) as e:
+        ui.secao("Verificando ambiente")
         ui.erro(str(e))
         raise typer.Exit(code=1)
 
-    if profile.name == "cluster":
-        ui.secao("Verificando perfil cluster (vLLM)")
-        with ui.console.status("[primaria]checando endpoint vLLM...[/]", spinner="dots"):
-            resultado = doctor.diagnosticar_cluster(profile.api_base, profile.model)
-        ui.tabela_diagnostico(resultado.checagens)
-        if not resultado.tudo_ok:
-            ui.erro("Perfil cluster nao esta pronto -- resolva os itens marcados acima.")
-    else:
+    if profile.name != "cluster":
         _rodar_diagnostico(grobid_url, ollama_url, modelo)
+        return
+
+    ui.secao("Verificando perfil cluster (vLLM)")
+    with ui.console.status("[primaria]checando endpoint vLLM...[/]", spinner="dots"):
+        resultado = doctor.diagnosticar_cluster(profile.api_base, profile.model)
+    ui.tabela_diagnostico(resultado.checagens)
+    if not resultado.tudo_ok:
+        ui.erro("Perfil cluster nao esta pronto -- resolva os itens marcados acima.")
 
 
 @app.callback(invoke_without_command=True)
@@ -78,6 +125,7 @@ def principal(ctx: typer.Context):
 # ============================================================ menu loop =====
 
 OPCOES_MENU = [
+    "Preparar pasta (docker-compose.yml + perfis) — primeira vez aqui",
     "Verificar ambiente (Docker / GROBID / Ollama / modelo)",
     "Rodar sobre uma pasta de PDFs",
     "Rodar via registry compartilhado (integração com SPE/pontodoi)",
@@ -112,18 +160,46 @@ def menu():
 
 def _despachar(escolha: int):
     if escolha == 1:
-        _fluxo_diagnostico_interativo()
+        _fluxo_init_interativo()
     elif escolha == 2:
-        _fluxo_rodar_pdf_dir()
+        _fluxo_diagnostico_interativo()
     elif escolha == 3:
-        _fluxo_rodar_registry()
+        _fluxo_rodar_pdf_dir()
     elif escolha == 4:
-        _fluxo_reconsolidar()
+        _fluxo_rodar_registry()
     elif escolha == 5:
+        _fluxo_reconsolidar()
+    elif escolha == 6:
         _ajuda()
 
 
 # ============================================================ fluxos ========
+
+def _fluxo_init_interativo():
+    ui.secao("Preparar pasta atual")
+    destino = Path.cwd()
+    faltando = init_cmd.arquivos_faltando(destino)
+    if not faltando:
+        ui.ok("docker-compose.yml e config/profiles/*.json já existem aqui.")
+        if not ui.confirmar("Sobrescrever mesmo assim?", padrao=False):
+            input("\nPressione Enter para voltar ao menu...")
+            return
+        force = True
+    else:
+        ui.info(f"Faltando: {', '.join(faltando)}")
+        force = False
+
+    escritos, pulados = init_cmd.inicializar(destino, force=force)
+    for rel in escritos:
+        ui.ok(f"criado: {rel}")
+    for rel in pulados:
+        ui.aviso(f"já existia, não sobrescrito: {rel}")
+
+    if escritos:
+        ui.console.print()
+        ui.dica("Próximo passo: [primaria]docker compose up -d[/] (sobe GROBID + Ollama).")
+    input("\nPressione Enter para voltar ao menu...")
+
 
 def _rodar_diagnostico(grobid_url: str, ollama_url: str, modelo: str) -> bool:
     """Roda o diagnóstico e imprime o resultado. Retorna True se está tudo
@@ -163,8 +239,21 @@ def _perguntar_parametros_llm() -> dict:
     try:
         profile = load_profile(perfil_nome)
     except (FileNotFoundError, ValueError) as e:
-        ui.erro(f"{e} -- usando perfil 'local'.")
-        profile = load_profile("local")
+        # Fallback para "local" so funciona se config/profiles/local.json
+        # existir -- se a causa raiz e a ausencia da pasta config/profiles/
+        # inteira (ex: pip install git+... sem rodar `init` ainda), tentar de
+        # novo so trocaria uma excecao por outra igual. Nesse caso, direciona
+        # para `init` em vez de mascarar o erro com uma 2a chamada fadada a
+        # falhar do mesmo jeito.
+        try:
+            profile = load_profile("local")
+            ui.erro(f"{e} -- usando perfil 'local'.")
+        except (FileNotFoundError, ValueError):
+            ui.erro(
+                f"{e}\n  Nenhum perfil disponível -- rode 'parsing-papers init' "
+                "(ou volte ao menu e use a opção 'Preparar pasta') antes de continuar."
+            )
+            raise
 
     if profile.name == "local":
         modelo = ui.perguntar("Modelo (Ollama)", doctor.MODELO_RECOMENDADO)
@@ -361,6 +450,8 @@ def _ajuda():
     ui.console.print("(modelos de ML, AUC, Accuracy etc.) para uma meta-análise, com verificação")
     ui.console.print("automática de citações e dupla extração para reduzir alucinação do LLM.\n")
     ui.secao("Fluxo típico")
+    ui.console.print("  0) Instalou via 'pip install git+...'? Rode a opção 1 (Preparar pasta) uma vez —")
+    ui.console.print("     cria docker-compose.yml e config/profiles/*.json aqui, que o pip não traz.")
     ui.console.print("  1) Verificar ambiente — confirma que Docker/GROBID/Ollama/modelo estão prontos.")
     ui.console.print("  2) Colocar os PDFs em uma pasta (ex: data/pdfs/) — ou usar a opção 3 se estiver")
     ui.console.print("     integrado com o SPE/pontodoi (registry compartilhado).")
@@ -379,6 +470,7 @@ def _ajuda():
     ui.console.print("  [suave]python -m parsing_papers.pipeline registry-run --registry .../registry.jsonl --out-dir data/extracted[/]")
     ui.console.print("  [suave]python -m parsing_papers.pipeline consolidate --out-dir data/extracted[/]")
     ui.console.print("  [suave]parsing-papers doctor[/]  — roda só o diagnóstico, fora do menu.")
+    ui.console.print("  [suave]parsing-papers init[/]    — cria docker-compose.yml e config/profiles/*.json aqui.")
 
 
 if __name__ == "__main__":

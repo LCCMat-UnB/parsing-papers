@@ -1,0 +1,14 @@
+{
+  "model": "openai/Qwen/Qwen2.5-32B-Instruct-AWQ",
+  "api_base": "http://localhost:8000/v1",
+  "temperature_a": 0.1,
+  "temperature_b": 0.4,
+  "max_tokens": 8000,
+  "min_num_ctx": 8192,
+  "request_timeout_s": 600,
+  "window_token_budget": 6000,
+  "max_concurrency": 12,
+  "fallback_budgets": [6000, 16000, null],
+  "arbiter_max_tokens": 1500,
+  "arbiter_min_num_ctx": 8192
+}

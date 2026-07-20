@@ -28,3 +28,10 @@ parsing-papers = "parsing_papers.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+# docker-compose.yml e config/profiles/*.json embutidos no pacote --
+# `parsing-papers init` os copia para o cwd do usuario. Necessario para que
+# `pip install git+...` (que descarta o resto do clone, so instala src/)
+# ainda permita montar os containers Docker necessarios.
+parsing_papers = ["resources/docker-compose.yml", "resources/config_profiles/*.json"]

@@ -14,3 +14,8 @@ data/audit/*
 .venv/
 .superpowers/
 debug_llm_raw.py
+
+# Notas internas de planejamento/desenvolvimento -- nao sao documentacao de
+# uso da ferramenta, ficam fora do repo publico.
+docs/superpowers/
+build/

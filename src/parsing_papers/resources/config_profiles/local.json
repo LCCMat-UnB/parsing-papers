@@ -1,0 +1,14 @@
+{
+  "model": "ollama_chat/qwen2.5:14b-instruct",
+  "api_base": "http://localhost:11434",
+  "temperature_a": 0.1,
+  "temperature_b": 0.4,
+  "max_tokens": 8000,
+  "min_num_ctx": 8000,
+  "request_timeout_s": 900,
+  "window_token_budget": 4000,
+  "max_concurrency": 1,
+  "fallback_budgets": [4000, 12000, null],
+  "arbiter_max_tokens": 1500,
+  "arbiter_min_num_ctx": 8000
+}

@@ -21,8 +21,10 @@ from __future__ import annotations
 import shutil
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from .grobid_client import GrobidClient
+from .init_cmd import arquivos_faltando
 
 DEFAULT_GROBID_URL = "http://localhost:8070"
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
@@ -61,8 +63,26 @@ class DiagnosticoResultado:
         porque o pipeline ainda funciona sem ela (só falha depois, ao tentar
         chamar um modelo que não existe; preferimos deixar isso visível como
         aviso, não travar o menu por causa disso)."""
-        bloqueantes = {"Docker", "Container GROBID", "Container Ollama", "GROBID respondendo", "Ollama respondendo"}
+        bloqueantes = {
+            "Arquivos locais (compose/perfis)", "Docker", "Container GROBID", "Container Ollama",
+            "GROBID respondendo", "Ollama respondendo",
+        }
         return all(c.ok for c in self.checagens if c.nome in bloqueantes)
+
+
+def _arquivos_locais_presentes() -> Checagem:
+    """docker-compose.yml e config/profiles/*.json nao existem se o usuario
+    instalou via `pip install git+...` (o pip descarta o resto do clone,
+    so instala o pacote Python) -- sem eles nao ha como montar os
+    containers nem carregar um perfil de deployment."""
+    faltando = arquivos_faltando(Path.cwd())
+    if faltando:
+        return Checagem(
+            "Arquivos locais (compose/perfis)", False,
+            f"faltando no diretorio atual: {', '.join(faltando)}.",
+            "parsing-papers init   (gera docker-compose.yml e config/profiles/*.json aqui)",
+        )
+    return Checagem("Arquivos locais (compose/perfis)", True, "docker-compose.yml e perfis presentes.")
 
 
 def _docker_disponivel() -> Checagem:
@@ -172,9 +192,20 @@ def diagnosticar(
     containers)."""
     resultado = DiagnosticoResultado()
 
+    arquivos_ok = _arquivos_locais_presentes()
+    resultado.checagens.append(arquivos_ok)
+
     docker_ok = _docker_disponivel()
     resultado.checagens.append(docker_ok)
     if not docker_ok.ok:
+        return resultado
+
+    if not arquivos_ok.ok:
+        # Sem docker-compose.yml nao ha "container esperado" nenhum para
+        # checar -- `docker compose up -d` nem tem o que ler. Nao adianta
+        # reportar "Container GROBID: nao esta rodando" quando a causa real
+        # e outra (falta o arquivo), so confundiria o usuario sobre o que
+        # resolver primeiro.
         return resultado
 
     grobid_container = _container_no_ar(CONTAINER_GROBID, "Container GROBID")

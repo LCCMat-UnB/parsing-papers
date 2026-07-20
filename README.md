@@ -18,7 +18,9 @@ SPE/pontodoi" abaixo), caso em que essas colunas são preenchidas automaticament
 
 Se você não tem intimidade com Docker/GROBID/Ollama ou prefere não decorar
 flags de linha de comando, use o menu interativo em vez das seções técnicas
-abaixo:
+abaixo.
+
+**Se você clonou este repositório:**
 
 ```bash
 pip install -e .
@@ -28,17 +30,42 @@ docker exec -it parsing_papers_ollama ollama pull qwen2.5:14b-instruct
 parsing-papers
 ```
 
+**Se você instalou via `pip install git+https://github.com/LCCMat-UnB/parsing-papers`
+(sem clonar):** o pip só instala o código Python — `docker-compose.yml` e
+`config/profiles/*.json` não vêm junto, porque ficam fora do pacote. Rode
+`parsing-papers init` uma vez, numa pasta vazia (ou que será a raiz do seu
+projeto), para gerá-los:
+
+```bash
+pip install git+https://github.com/LCCMat-UnB/parsing-papers
+mkdir meu-projeto && cd meu-projeto
+parsing-papers init          # cria docker-compose.yml + config/profiles/*.json aqui
+docker compose up -d
+docker exec -it parsing_papers_ollama ollama pull qwen2.5:14b-instruct
+
+parsing-papers
+```
+
+`parsing-papers init` não sobrescreve arquivos já existentes (use `--force`
+se quiser substituir por uma versão nova). O menu interativo (opção "Preparar
+pasta") e o `parsing-papers doctor` também avisam se esses arquivos estiverem
+faltando, com o comando exato para resolver.
+
 Isso abre um menu colorido (mesmo estilo do SPE e do pontodoi) com:
 
-1. **Verificar ambiente** — checa Docker, os dois containers, GROBID e Ollama
+1. **Preparar pasta** — cria `docker-compose.yml` e `config/profiles/*.json`
+   no diretório atual, caso ainda não existam (equivalente a
+   `parsing-papers init`). Só é necessário na primeira vez, e principalmente
+   para quem instalou via `pip install git+...`.
+2. **Verificar ambiente** — checa Docker, os dois containers, GROBID e Ollama
    respondendo, e se o modelo já foi baixado, nessa ordem. Se algo estiver
    faltando, mostra o comando exato para resolver — não tenta corrigir nada
    sozinho.
-2. **Rodar sobre uma pasta de PDFs** — pergunta a pasta de entrada/saída e o
+3. **Rodar sobre uma pasta de PDFs** — pergunta a pasta de entrada/saída e o
    modelo, com valores padrão prontos (Enter aceita o padrão).
-3. **Rodar via registry compartilhado** — para quem usa o Synoptic Paper
+4. **Rodar via registry compartilhado** — para quem usa o Synoptic Paper
    Engine + pontodoi (ver seção "Integração com SPE/pontodoi").
-4. **Reconsolidar planilha** — reconstrói a planilha final a partir de
+5. **Reconsolidar planilha** — reconstrói a planilha final a partir de
    checkpoints já existentes, sem reprocessar PDFs.
 
 Ao final de cada rodada, um resumo em linguagem simples explica quantos
