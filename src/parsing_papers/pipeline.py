@@ -75,13 +75,14 @@ def _partial_checkpoint_path(checkpoint_dir: Path, paper_id: str) -> Path:
     return checkpoint_dir / f"{paper_id}.partial.json"
 
 
-def _save_partial_checkpoint(checkpoint_dir: Path, paper_id: str, source_text: str, extraction_a: PaperExtraction) -> None:
+def _save_partial_checkpoint(checkpoint_dir: Path, paper_id: str, source_text: str, extraction_a: PaperExtraction, fallback_level: int = 0) -> None:
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     path = _partial_checkpoint_path(checkpoint_dir, paper_id)
     payload = {
         "paper_id": paper_id,
         "source_text": source_text,
         "extraction_a": extraction_a.model_dump(),
+        "fallback_level": fallback_level,
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     logger.info("Checkpoint intermediario salvo (extracao_a concluida): %s", path)
@@ -245,7 +246,7 @@ def process_one_pdf(
                 return None
 
             # Checkpoint intermediario com o TEXTO FINAL usado (apos escalada)
-            _save_partial_checkpoint(checkpoint_dir, paper_id, source_text, extraction_a)
+            _save_partial_checkpoint(checkpoint_dir, paper_id, source_text, extraction_a, fallback_level)
 
         # Etapas 2b e 4: extracao B sobre o MESMO contexto final de A
         t0 = time.monotonic()
@@ -397,10 +398,16 @@ def export_screening_outputs(screening_results: list[dict], out_dir: Path) -> tu
 
 
 def build_final_outputs(checkpoints: list[dict], out_dir: Path) -> tuple[Path, Path, Path, Path]:
-    extractions = [PaperExtraction.model_validate(c["extraction_a"]) for c in checkpoints]
+    # Extracao reconciliada (A + decisoes do arbitro) e a fonte da planilha;
+    # checkpoints antigos (sem extraction_reconciled) caem no fallback para A.
+    extractions = [
+        PaperExtraction.model_validate(c.get("extraction_reconciled") or c["extraction_a"])
+        for c in checkpoints
+    ]
 
     verifications_by_paper = {}
     dual_comparisons_by_paper = {}
+    arbiter_resolutions_by_paper = {}
     for c in checkpoints:
         paper_id = c["paper_id"]
         from .verification import FieldVerification, RecordVerificationResult
@@ -421,7 +428,11 @@ def build_final_outputs(checkpoints: list[dict], out_dir: Path) -> tuple[Path, P
             comp["index_a"]: comp for comp in c["comparisons"] if comp["index_a"] is not None
         }
 
-    df = build_dataframe(extractions, verifications_by_paper, dual_comparisons_by_paper)
+        arbiter_resolutions_by_paper[paper_id] = {}
+        for r in c.get("arbiter_resolutions", []):
+            arbiter_resolutions_by_paper[paper_id].setdefault(r["index_a"], set()).add(r["field_name"])
+
+    df = build_dataframe(extractions, verifications_by_paper, dual_comparisons_by_paper, arbiter_resolutions_by_paper)
 
     xlsx_path, csv_path = export(df, out_dir, basename="metadados_extraidos")
 
@@ -473,7 +484,7 @@ def process_pdf_directory(
         request_timeout=profile.request_timeout_s,
         min_num_ctx=profile.min_num_ctx,
     )
-    # Arbitro: determinístico (temp 0) e com saida curta -- o prompt ja e
+    # Arbitro: deterministico (temp 0) e com saida curta -- o prompt ja e
     # pequeno por carregar so os campos divergentes + a janela.
     arbiter_client = ArbiterClient(
         LLMExtractor(

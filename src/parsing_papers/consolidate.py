@@ -69,18 +69,25 @@ OUTPUT_COLUMNS = BIBLIOGRAPHIC_PLACEHOLDER_COLUMNS + [
     "dual_match_score",
     "dual_divergent_fields",
     "dual_unmatched",
+    "arbiter_resolved_fields",
     "needs_review",
     "extraction_notes",
 ]
 
 
-def _dual_comparison_summary(comparison: dict | None) -> dict:
+def _dual_comparison_summary(comparison: dict | None, resolved_fields: set[str] | None = None) -> dict:
     """
     Extrai da comparacao A/B (dict serializado a partir de RecordComparison,
     ver pipeline.py) os campos que vao para a planilha final. `comparison` e
     None quando nao ha checkpoint de dupla extracao disponivel para o registro
     (ex: consolidacao de dados legados).
+
+    resolved_fields: campos ja decididos pelo arbitro (choice "a" ou "b") --
+    sao REMOVIDOS da lista de divergentes e reportados em
+    arbiter_resolved_fields. dual_extraction_diverges passa a significar
+    "diverge E nao foi resolvido", que e o que merece revisao humana.
     """
+    resolved_fields = resolved_fields or set()
     if comparison is None:
         return {
             "dual_extraction_diverges": None,
@@ -88,18 +95,22 @@ def _dual_comparison_summary(comparison: dict | None) -> dict:
             "dual_match_score": None,
             "dual_divergent_fields": "",
             "dual_unmatched": False,
+            "arbiter_resolved_fields": "",
         }
 
     unmatched = comparison.get("index_b") is None
-    divergent_field_names = [
-        d["field_name"] for d in comparison.get("divergences", []) if d.get("diverges")
+    remaining_divergent = [
+        d["field_name"]
+        for d in comparison.get("divergences", [])
+        if d.get("diverges") and d["field_name"] not in resolved_fields
     ]
     return {
-        "dual_extraction_diverges": comparison.get("has_divergence"),
+        "dual_extraction_diverges": bool(remaining_divergent) or unmatched,
         "dual_model_used_b": comparison.get("model_used_b") or "",
         "dual_match_score": comparison.get("match_score"),
-        "dual_divergent_fields": ", ".join(divergent_field_names),
+        "dual_divergent_fields": ", ".join(remaining_divergent),
         "dual_unmatched": unmatched,
+        "arbiter_resolved_fields": ", ".join(sorted(resolved_fields)),
     }
 
 
@@ -108,6 +119,7 @@ def record_to_row(
     record,
     verification: RecordVerificationResult | None = None,
     dual_comparison: dict | None = None,
+    arbiter_resolved: set[str] | None = None,
 ) -> dict:
     flags = check_record(record)
     sanity_failed = record_has_failures(flags)
@@ -116,7 +128,7 @@ def record_to_row(
     citation_verified = verification.all_verified if verification else None
     unverified_fields = ", ".join(verification.unverified_fields) if verification else ""
 
-    dual_summary = _dual_comparison_summary(dual_comparison)
+    dual_summary = _dual_comparison_summary(dual_comparison, arbiter_resolved)
 
     needs_review = bool(
         sanity_failed
@@ -164,6 +176,7 @@ def build_dataframe(
     extractions: list[PaperExtraction],
     verifications_by_paper: dict[str, list[RecordVerificationResult]] | None = None,
     dual_comparisons_by_paper: dict[str, dict[int, dict]] | None = None,
+    arbiter_resolutions_by_paper: dict[str, dict[int, set[str]]] | None = None,
 ) -> pd.DataFrame:
     """
     dual_comparisons_by_paper: paper_id -> {index_a: comparison_dict}, onde
@@ -172,15 +185,21 @@ def build_dataframe(
     registro dentro de extraction_a.records) em vez de posicao na lista de
     comparacoes, porque comparacoes de registros "so em B" nao tem index_a e
     nao devem ser confundidas com as de registros de A.
+
+    arbiter_resolutions_by_paper: paper_id -> {index_a: {field_name, ...}}
+    com os campos ja resolvidos pelo arbitro (ver pipeline.py:
+    result["arbiter_resolutions"]).
     """
     rows = []
     for extraction in extractions:
         verifications = (verifications_by_paper or {}).get(extraction.paper_id)
         comparisons_by_index_a = (dual_comparisons_by_paper or {}).get(extraction.paper_id, {})
+        resolutions_by_index_a = (arbiter_resolutions_by_paper or {}).get(extraction.paper_id, {})
         for idx, record in enumerate(extraction.records):
             verification = verifications[idx] if verifications and idx < len(verifications) else None
             dual_comparison = comparisons_by_index_a.get(idx)
-            rows.append(record_to_row(extraction.paper_id, record, verification, dual_comparison))
+            arbiter_resolved = resolutions_by_index_a.get(idx)
+            rows.append(record_to_row(extraction.paper_id, record, verification, dual_comparison, arbiter_resolved))
 
     df = pd.DataFrame(rows, columns=OUTPUT_COLUMNS)
     return df
