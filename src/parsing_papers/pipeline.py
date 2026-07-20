@@ -28,7 +28,7 @@ planilha de triagem PRISMA (todos os papers, incluidos ou nao).
 
 Uso:
     python -m parsing_papers.pipeline run --pdf-dir data/pdfs --out-dir data/extracted \\
-        --model ollama_chat/qwen2.5:14b-instruct --grobid-url http://localhost:8070
+        --profile local --grobid-url http://localhost:8070
 """
 
 from __future__ import annotations
@@ -574,8 +574,8 @@ def _resolve_profile(
     if min_num_ctx is not None:
         overrides["min_num_ctx"] = min_num_ctx
     resolved = replace(profile, **overrides) if overrides else profile
-    logger.info("Perfil '%s': model=%s api_base=%s budget=%s concorrencia=%d",
-                resolved.name, resolved.model, resolved.api_base, resolved.window_token_budget, resolved.max_concurrency)
+    logger.info("Perfil '%s': model=%s api_base=%s fallback=%s concorrencia=%d",
+                resolved.name, resolved.model, resolved.api_base, resolved.fallback_budgets, resolved.max_concurrency)
     return resolved
 
 

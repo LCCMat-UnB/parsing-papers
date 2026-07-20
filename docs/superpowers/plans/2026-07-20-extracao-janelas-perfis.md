@@ -19,6 +19,8 @@
 - Testes determinísticos, sem GROBID/Ollama/GPU — stubs e mocks como nos testes atuais (ver `tests/test_dual_extraction.py` para o padrão de fixtures `ModelRecord`).
 - Desvio deliberado da spec: blocos NÃO carregam offsets no `source_text` original; em vez disso cada `Block` carrega seu texto já renderizado (`rendered`), e a verificação de citações roda sobre a concatenação dos blocos selecionados (que é exatamente o texto que o LLM viu). Funcionalmente equivalente, mais simples.
 - Desvio deliberado da spec: em vez de um fixture TEI sintético grande em arquivo, os testes de orçamento constroem um `ParsedPaper` sintético em código (`tests/test_pipeline_windows.py`) — mesmo efeito, menos arquivo para manter.
+- Desvio deliberado da spec: o gatilho de escalada "seletor com poucos blocos" foi descartado — apenas extracao A vazia escala (nao existe oraculo para "incompleto mas nao-vazio"); o recall continua limitado pelo full-text no ultimo nivel.
+- Desvio deliberado da spec: o prompt do arbitro NAO inclui as quotes de A/B (FieldDivergence carrega so valores); a janela de texto completa ja vai no prompt, entao o impacto e baixo.
 - Commits ao final de cada task, mensagens em português estilo conventional commits (ex: `feat: adiciona segmentacao em blocos`).
 
 ---

@@ -49,13 +49,18 @@ def doctor_cmd(
     profile_name: str = typer.Option("local", "--profile", help="Perfil a diagnosticar (local | cluster)."),
 ):
     """Verifica se o ambiente do perfil esta pronto (Docker/GROBID/Ollama no local; endpoint vLLM no cluster)."""
-    if profile_name == "cluster":
-        from .profiles import load_profile
+    from .profiles import load_profile
 
-        p = load_profile("cluster")
+    try:
+        profile = load_profile(profile_name)
+    except (FileNotFoundError, ValueError) as e:
+        ui.erro(str(e))
+        raise typer.Exit(code=1)
+
+    if profile.name == "cluster":
         ui.secao("Verificando perfil cluster (vLLM)")
         with ui.console.status("[primaria]checando endpoint vLLM...[/]", spinner="dots"):
-            resultado = doctor.diagnosticar_cluster(p.api_base, p.model)
+            resultado = doctor.diagnosticar_cluster(profile.api_base, profile.model)
         ui.tabela_diagnostico(resultado.checagens)
         if not resultado.tudo_ok:
             ui.erro("Perfil cluster nao esta pronto -- resolva os itens marcados acima.")

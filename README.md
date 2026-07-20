@@ -296,19 +296,20 @@ Além das colunas da planilha oficial, cada linha traz:
 | `unverified_fields` | Lista dos campos cuja citação não verificou |
 | `sanity_failed` | `True` se algum valor numérico violou uma regra de faixa |
 | `sanity_messages` | Detalhe das violações de faixa |
-| `dual_extraction_diverges` | `True` se a segunda extração (temperatura/modelo diferente) discordou acima da tolerância, ou se o registro não teve par correspondente na outra extração |
+| `dual_extraction_diverges` | `True` se restou divergência entre as duas extrações NÃO resolvida pelo árbitro automático, ou se o registro não teve par correspondente na outra extração |
 | `dual_model_used_b` | Nome do modelo pareado na extração B (pareamento por similaridade de `model_used`, não por posição) |
 | `dual_match_score` | Score de similaridade (0-100) do pareamento A/B pelo nome do modelo |
-| `dual_divergent_fields` | Lista dos campos que divergiram entre as duas extrações, para essa linha |
+| `dual_divergent_fields` | Lista dos campos que divergiram entre as duas extrações e NÃO foram resolvidos pelo árbitro, para essa linha |
 | `dual_unmatched` | `True` se o registro de A não encontrou correspondente em B (score de similaridade abaixo do limiar) |
-| `needs_review` | OR de todos os flags acima — usado para priorizar a amostra de auditoria |
+| `arbiter_resolved_fields` | Lista dos campos divergentes que o árbitro automático resolveu (escolha "a" ou "b"), para essa linha |
+| `needs_review` | OR de todos os flags acima (divergência só conta se NÃO resolvida pelo árbitro) — usado para priorizar a amostra de auditoria |
 
 Recomenda-se **não aceitar automaticamente** nenhuma linha com
 `needs_review=True` na planilha final da meta-análise sem revisão humana.
 
 ## Testes
 
-O repositório tem 69 testes unitários cobrindo os módulos determinísticos
+O repositório tem 107 testes unitários cobrindo os módulos determinísticos
 (schema, parsing GROBID, verificação de citação, sanidade, parser numérico,
 deduplicação, pareamento A/B, reconciliação na planilha final, checkpoint
 intermediário, triagem PRISMA, consolidação, amostragem) — nenhum deles
@@ -362,6 +363,10 @@ sentido (comparando manualmente com o PDF).
   divergência espúria quando o LLM lista os mesmos modelos em ordens
   diferentes entre as duas chamadas. Registros sem correspondente do outro
   lado ficam marcados como `dual_unmatched` para revisão humana.
+- **Árbitro automático de divergências.** As divergências da dupla extração
+  vão para um árbitro automático (uma terceira chamada mínima ao LLM, que
+  decide "a"/"b"/"neither" campo a campo); as que ele não resolve continuam
+  flagadas para revisão humana.
 - **Baseline.** Regressão Logística é marcada `baseline=yes` quando usada
   como controle, conforme convenção do projeto; isso é reforçado no prompt
   (regra 4), mas cabe ao revisor humano confirmar nos casos ambíguos.
