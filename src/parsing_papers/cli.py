@@ -136,9 +136,13 @@ def _fluxo_diagnostico_interativo():
 
 
 def _perguntar_parametros_llm() -> dict:
-    """Pergunta os parâmetros de modelo/execução com defaults sensatos —
-    Enter aceita o padrão, então quem não sabe o que são essas opções pode
-    simplesmente confirmar sem entender cada flag."""
+    """Monta o perfil de execucao a partir do perfil local + override de modelo
+    perguntado ao usuario. A pergunta de perfil (local/cluster) chega na Task 10;
+    aqui o menu continua funcionando como antes, agora via Profile."""
+    from dataclasses import replace
+
+    from .profiles import load_profile
+
     modelo = ui.perguntar("Modelo (Ollama)", doctor.MODELO_RECOMENDADO)
     skip_screening = ui.confirmar(
         "Pular a triagem PRISMA e processar todos os PDFs direto? "
@@ -146,17 +150,16 @@ def _perguntar_parametros_llm() -> dict:
         padrao=False,
     )
     force = ui.confirmar("Reprocessar mesmo papers que já têm checkpoint salvo?", padrao=False)
+    profile = load_profile("local")
+    if modelo != doctor.MODELO_RECOMENDADO:
+        profile = replace(profile, model=f"ollama_chat/{modelo}" if not modelo.startswith("ollama_chat/") else modelo)
     return {
         "grobid_url": doctor.DEFAULT_GROBID_URL,
-        "model": f"ollama_chat/{modelo}" if not modelo.startswith("ollama_chat/") else modelo,
-        "api_base": doctor.DEFAULT_OLLAMA_URL,
-        "temperature": 0.1,
         "citation_threshold": 90.0,
         "grobid_wait_s": 300,
-        "llm_timeout_s": 900,
-        "min_num_ctx": 16000,
         "skip_screening": skip_screening,
         "force": force,
+        "profile": profile,
     }
 
 
@@ -186,9 +189,8 @@ def _fluxo_rodar_pdf_dir():
 
     ui.console.print()
     ui.secao("Processando")
-    process_pdf_directory(pdf_dir, out_dir, params["grobid_url"], params["model"], params["api_base"],
-                           params["temperature"], params["citation_threshold"], params["grobid_wait_s"],
-                           params["llm_timeout_s"], params["min_num_ctx"], params["skip_screening"], params["force"])
+    process_pdf_directory(pdf_dir, out_dir, params["grobid_url"], params["citation_threshold"],
+                          params["grobid_wait_s"], params["skip_screening"], params["force"], params["profile"])
 
     checkpoint_dir = out_dir / "checkpoints"
     screening_dir = out_dir / "screening"
@@ -241,9 +243,8 @@ def _fluxo_rodar_registry():
 
     ui.console.print()
     ui.secao("Processando")
-    process_pdf_directory(staging_dir, out_dir, params["grobid_url"], params["model"], params["api_base"],
-                           params["temperature"], params["citation_threshold"], params["grobid_wait_s"],
-                           params["llm_timeout_s"], params["min_num_ctx"], params["skip_screening"], params["force"])
+    process_pdf_directory(staging_dir, out_dir, params["grobid_url"], params["citation_threshold"],
+                          params["grobid_wait_s"], params["skip_screening"], params["force"], params["profile"])
 
     checkpoint_dir = out_dir / "checkpoints"
     screening_dir = out_dir / "screening"

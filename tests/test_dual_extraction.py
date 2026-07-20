@@ -153,3 +153,29 @@ def test_similar_but_distinct_model_names_are_paired_by_fuzzy_match():
     assert non_name_divergences == []
     model_used_div = next(d for d in comp.divergences if d.field_name == "model_used")
     assert model_used_div.diverges is True
+
+
+def test_extractor_b_inherits_min_num_ctx():
+    """Bug: o extractor_b interno era construido sem min_num_ctx e caia no
+    default 16000 da classe mesmo quando A pedia mais -- B podia ter o prompt
+    truncado em papers grandes. As duas chamadas devem pedir o mesmo num_ctx."""
+    from unittest.mock import patch
+
+    from parsing_papers.llm_client import LLMExtractor
+    from parsing_papers.dual_extraction import run_dual_extraction
+    from parsing_papers.schema import PaperExtraction
+
+    seen_num_ctx = []
+
+    def fake_completion(**kwargs):
+        seen_num_ctx.append(kwargs.get("num_ctx"))
+        return {"choices": [{"message": {"content": '{"paper_id": "p", "records": []}'}}]}
+
+    extractor_a = LLMExtractor(
+        model="ollama_chat/fake", api_base="http://localhost:1",
+        temperature=0.1, max_tokens=100, request_timeout=10, min_num_ctx=12345,
+    )
+    with patch("litellm.completion", side_effect=fake_completion):
+        run_dual_extraction("p", "texto curto", extractor_a)
+
+    assert seen_num_ctx == [12345, 12345]

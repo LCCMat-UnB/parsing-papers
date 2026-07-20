@@ -264,6 +264,7 @@ def run_dual_extraction(
             temperature=max(extractor_a.temperature, 0.4),
             max_tokens=extractor_a.max_tokens,
             request_timeout=extractor_a.request_timeout,
+            min_num_ctx=extractor_a.min_num_ctx,
         )
 
     if existing_extraction_a is not None:

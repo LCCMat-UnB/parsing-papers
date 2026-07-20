@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -42,14 +43,18 @@ import click
 import pandas as pd
 from tqdm import tqdm
 
+from .arbiter import ArbiterClient, apply_arbiter_decisions
 from .audit_sampling import AuditSampleConfig, select_audit_sample
+from .blocks import segment_paper
 from .consolidate import build_dataframe, export
 from .dual_extraction import compare_extractions, run_dual_extraction
 from .grobid_client import GrobidClient
 from .llm_client import ExtractionError, LLMExtractor
+from .profiles import Profile, load_profile
 from .schema import PaperExtraction
 from .screening import ScreeningClient, ScreeningError, should_proceed_to_extraction
 from .screening_schema import ScreeningResult
+from .selection import estimate_tokens, render_blocks, select_blocks
 from .verification import verify_paper_extraction
 from . import registry as reg
 
@@ -154,6 +159,9 @@ def process_one_pdf(
     force: bool = False,
     screening_client: ScreeningClient | None = None,
     screening_dir: Path | None = None,
+    extractor_b: LLMExtractor | None = None,
+    arbiter_client: ArbiterClient | None = None,
+    fallback_budgets: list[int | None] | None = None,
 ) -> dict | None:
     paper_id = pdf_path.stem
     ckpt_path = _checkpoint_path(checkpoint_dir, paper_id)
@@ -163,86 +171,137 @@ def process_one_pdf(
         return json.loads(ckpt_path.read_text(encoding="utf-8"))
 
     if force:
-        # --force reprocessa do zero -- descarta tambem qualquer checkpoint
-        # parcial obsoleto (ex: de uma extracao_a com um prompt/modelo antigo).
         _clear_partial_checkpoint(checkpoint_dir, paper_id)
 
     logger.info("Processando %s ...", paper_id)
+    timing: dict[str, float] = {}
+    t_start = time.monotonic()
 
     # Tenta reaproveitar uma extracao_a de um checkpoint intermediario (de uma
     # execucao anterior interrompida antes de completar este paper).
     partial = _load_partial_checkpoint(checkpoint_dir, paper_id)
-    existing_extraction_a = None
+    extraction_a = None
     source_text = None
+    fallback_level = 0
     if partial is not None:
         try:
-            existing_extraction_a = PaperExtraction.model_validate(partial["extraction_a"])
+            extraction_a = PaperExtraction.model_validate(partial["extraction_a"])
             source_text = partial["source_text"]
+            fallback_level = partial.get("fallback_level", 0)
             logger.info(
-                "Retomando %s a partir de checkpoint intermediario -- reusando extracao_a (%d registros), pulando GROBID e a chamada de extracao_a.",
-                paper_id, len(existing_extraction_a.records),
+                "Retomando %s a partir de checkpoint intermediario -- reusando extracao_a (%d registros), pulando GROBID e a extracao_a.",
+                paper_id, len(extraction_a.records),
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("Checkpoint intermediario de %s invalido (%s) -- reprocessando do zero.", paper_id, e)
-            existing_extraction_a = None
+            extraction_a = None
             source_text = None
 
     parsed = None
-    if source_text is None:
-        # Etapa 1: GROBID
-        parsed = grobid.parse_pdf(pdf_path, tei_cache_dir=tei_cache_dir)
+    try:
+        if extraction_a is None:
+            # Etapa 1: GROBID
+            t0 = time.monotonic()
+            parsed = grobid.parse_pdf(pdf_path, tei_cache_dir=tei_cache_dir)
+            timing["grobid_s"] = round(time.monotonic() - t0, 2)
 
-        # Etapa 0: triagem PRISMA -- roda ANTES da extracao cara. Paper
-        # excluido na triagem nao prossegue (economiza a dupla extracao com
-        # texto completo, que e a chamada mais cara do pipeline).
-        if screening_client is not None and screening_dir is not None:
-            screening_result = run_screening_for_paper(paper_id, parsed, screening_client, screening_dir, force=force)
-            if screening_result is not None and not should_proceed_to_extraction(screening_result):
-                logger.info(
-                    "%s excluido na triagem PRISMA (decisao=%s) -- pulando extracao de metricas.",
-                    paper_id, screening_result.decision.value,
+            # Etapa 0: triagem PRISMA (inalterada -- roda antes da extracao cara)
+            if screening_client is not None and screening_dir is not None:
+                screening_result = run_screening_for_paper(paper_id, parsed, screening_client, screening_dir, force=force)
+                if screening_result is not None and not should_proceed_to_extraction(screening_result):
+                    logger.info(
+                        "%s excluido na triagem PRISMA (decisao=%s) -- pulando extracao de metricas.",
+                        paper_id, screening_result.decision.value,
+                    )
+                    return None
+
+            if parsed.empty_table_labels:
+                logger.warning(
+                    "%s: %d tabela(s) identificadas pelo GROBID vieram sem conteudo extraido (%s). "
+                    "O bloco de aviso na janela instrui o LLM a buscar esses valores em texto corrido.",
+                    paper_id, len(parsed.empty_table_labels), "; ".join(parsed.empty_table_labels),
                 )
+
+            # Etapa 2a: extracao A sobre JANELAS com escada de fallback.
+            # budget=None (ultimo nivel) = full-text = comportamento antigo;
+            # so escala quando a extracao vem vazia -- nunca pior que antes.
+            budgets = fallback_budgets or [None]
+            blocks = segment_paper(parsed)
+            t0 = time.monotonic()
+            for level, budget in enumerate(budgets):
+                source_text = render_blocks(select_blocks(blocks, budget))
+                extraction_a = extractor_a.extract(paper_id, source_text)
+                fallback_level = level
+                if extraction_a.records or level == len(budgets) - 1:
+                    break
+                logger.info(
+                    "%s: extracao A vazia com janela de %s tokens -- escalando orcamento (nivel %d).",
+                    paper_id, budget, level + 1,
+                )
+            timing["extraction_a_s"] = round(time.monotonic() - t0, 2)
+
+            if not source_text.strip():
+                logger.warning("Texto vazio apos parsing GROBID para %s -- pulando.", paper_id)
                 return None
 
-        source_text = parsed.methods_and_results_text()
-        if not source_text.strip():
-            logger.warning("Texto vazio apos parsing GROBID para %s -- pulando.", paper_id)
-            return None
-        if parsed.empty_table_labels:
-            logger.warning(
-                "%s: %d tabela(s) identificadas pelo GROBID vieram sem conteudo extraido (%s). "
-                "O LLM foi instruido a buscar esses valores em texto corrido, mas vale conferir "
-                "manualmente se os numeros criticos ficaram de fora.",
-                paper_id, len(parsed.empty_table_labels), "; ".join(parsed.empty_table_labels),
-            )
+            # Checkpoint intermediario com o TEXTO FINAL usado (apos escalada)
+            _save_partial_checkpoint(checkpoint_dir, paper_id, source_text, extraction_a)
 
-    empty_table_labels = parsed.empty_table_labels if parsed is not None else []
-
-    def _on_extraction_a_done(extraction_a: PaperExtraction) -> None:
-        _save_partial_checkpoint(checkpoint_dir, paper_id, source_text, extraction_a)
-
-    # Etapas 2 e 4: dupla extracao
-    try:
+        # Etapas 2b e 4: extracao B sobre o MESMO contexto final de A
+        t0 = time.monotonic()
         dual_result = run_dual_extraction(
             paper_id,
             source_text,
             extractor_a,
-            existing_extraction_a=existing_extraction_a,
-            on_extraction_a_done=_on_extraction_a_done,
+            extractor_b=extractor_b,
+            existing_extraction_a=extraction_a,
         )
+        timing["extraction_b_s"] = round(time.monotonic() - t0, 2)
     except ExtractionError as e:
         logger.error("Falha na extracao de %s: %s", paper_id, e)
         return None
 
-    # Etapa 3: verificacao de citacoes (roda sobre a extracao A, que e a "principal")
-    verifications = verify_paper_extraction(dual_result.extraction_a, source_text, threshold=citation_threshold)
+    empty_table_labels = parsed.empty_table_labels if parsed is not None else []
+
+    # Etapa 4b: arbitro resolve divergencias campo a campo (uma chamada por
+    # registro divergente; prompts minusculos). Falha do arbitro -> comportamento
+    # antigo (flags), nunca bloqueia.
+    resolutions: list[dict] = []
+    reconciled = dual_result.extraction_a
+    if arbiter_client is not None and dual_result.needs_human_review:
+        t0 = time.monotonic()
+        decisions = {}
+        for comp in dual_result.comparisons:
+            if comp.index_a is None or comp.index_b is None:
+                continue
+            divergent = [d for d in comp.divergences if d.diverges]
+            if not divergent:
+                continue
+            dec = arbiter_client.arbitrate_record(paper_id, comp.model_used_a or "", divergent, source_text)
+            if dec is not None:
+                decisions[comp.index_a] = dec
+        if decisions:
+            reconciled, resolutions = apply_arbiter_decisions(
+                dual_result.extraction_a, dual_result.extraction_b, dual_result.comparisons, decisions
+            )
+        timing["arbiter_s"] = round(time.monotonic() - t0, 2)
+
+    # Etapa 3: verificacao de citacoes sobre a extracao RECONCILIADA, contra o
+    # texto que o LLM efetivamente viu (janela) -- quotes validas por construcao.
+    verifications = verify_paper_extraction(reconciled, source_text, threshold=citation_threshold)
+    timing["total_s"] = round(time.monotonic() - t_start, 2)
 
     result = {
         "paper_id": paper_id,
         "source_text_len": len(source_text),
+        "estimated_prompt_tokens": estimate_tokens(source_text),
+        "fallback_level": fallback_level,
+        "timing": timing,
         "empty_table_labels": empty_table_labels,
         "extraction_a": dual_result.extraction_a.model_dump(),
         "extraction_b": dual_result.extraction_b.model_dump(),
+        "extraction_reconciled": reconciled.model_dump(),
+        "arbiter_resolutions": resolutions,
         "record_count_mismatch": dual_result.record_count_mismatch,
         "comparisons": [
             {
@@ -379,15 +438,11 @@ def process_pdf_directory(
     pdf_dir: Path,
     out_dir: Path,
     grobid_url: str,
-    model: str,
-    api_base: str,
-    temperature: float,
     citation_threshold: float,
     grobid_wait_s: int,
-    llm_timeout_s: int,
-    min_num_ctx: int,
     skip_screening: bool,
     force: bool,
+    profile: Profile,
 ) -> list[dict]:
     """Corpo de `run`, extraido para ser reusado por `registry-run` (que monta
     seu proprio --pdf-dir/--out-dir a partir do registry compartilhado antes
@@ -403,24 +458,44 @@ def process_pdf_directory(
     logger.info("GROBID ok.")
 
     extractor_a = LLMExtractor(
-        model=model,
-        api_base=api_base,
-        temperature=temperature,
-        request_timeout=llm_timeout_s,
-        min_num_ctx=min_num_ctx,
+        model=profile.model,
+        api_base=profile.api_base,
+        temperature=profile.temperature_a,
+        max_tokens=profile.max_tokens,
+        request_timeout=profile.request_timeout_s,
+        min_num_ctx=profile.min_num_ctx,
+    )
+    extractor_b = LLMExtractor(
+        model=profile.model,
+        api_base=profile.api_base,
+        temperature=profile.temperature_b,
+        max_tokens=profile.max_tokens,
+        request_timeout=profile.request_timeout_s,
+        min_num_ctx=profile.min_num_ctx,
+    )
+    # Arbitro: determinístico (temp 0) e com saida curta -- o prompt ja e
+    # pequeno por carregar so os campos divergentes + a janela.
+    arbiter_client = ArbiterClient(
+        LLMExtractor(
+            model=profile.model,
+            api_base=profile.api_base,
+            temperature=0.0,
+            max_tokens=profile.arbiter_max_tokens,
+            request_timeout=profile.request_timeout_s,
+            min_num_ctx=profile.arbiter_min_num_ctx,
+        )
     )
 
     screening_client = None
     if not skip_screening:
-        screening_client = ScreeningClient(model=model, api_base=api_base, request_timeout=llm_timeout_s)
+        screening_client = ScreeningClient(model=profile.model, api_base=profile.api_base, request_timeout=profile.request_timeout_s)
 
     pdfs = sorted(pdf_dir.glob("*.pdf"))
     if not pdfs:
         logger.warning("Nenhum PDF encontrado em %s", pdf_dir)
         return []
 
-    processed = []
-    for pdf_path in tqdm(pdfs, desc="Processando papers"):
+    def _process(pdf_path: Path) -> dict:
         try:
             result = process_one_pdf(
                 pdf_path,
@@ -432,13 +507,49 @@ def process_pdf_directory(
                 force=force,
                 screening_client=screening_client,
                 screening_dir=screening_dir if not skip_screening else None,
+                extractor_b=extractor_b,
+                arbiter_client=arbiter_client,
+                fallback_budgets=profile.fallback_budgets,
             )
-            processed.append({"paper_id": pdf_path.stem, "result": result})
+            return {"paper_id": pdf_path.stem, "result": result}
         except Exception:  # noqa: BLE001
             logger.exception("Erro nao tratado processando %s -- pulando para o proximo.", pdf_path.name)
-            processed.append({"paper_id": pdf_path.stem, "result": None, "error": True})
+            return {"paper_id": pdf_path.stem, "result": None, "error": True}
+
+    processed = []
+    for pdf_path in tqdm(pdfs, desc="Processando papers"):
+        processed.append(_process(pdf_path))
 
     return processed
+
+
+def _resolve_profile(
+    profile_name: str,
+    model: str | None,
+    api_base: str | None,
+    temperature: float | None,
+    llm_timeout_s: int | None,
+    min_num_ctx: int | None,
+) -> Profile:
+    """Perfil do JSON + overrides individuais da CLI (flags tem precedencia)."""
+    from dataclasses import replace
+
+    profile = load_profile(profile_name)
+    overrides = {}
+    if model is not None:
+        overrides["model"] = model
+    if api_base is not None:
+        overrides["api_base"] = api_base
+    if temperature is not None:
+        overrides["temperature_a"] = temperature
+    if llm_timeout_s is not None:
+        overrides["request_timeout_s"] = llm_timeout_s
+    if min_num_ctx is not None:
+        overrides["min_num_ctx"] = min_num_ctx
+    resolved = replace(profile, **overrides) if overrides else profile
+    logger.info("Perfil '%s': model=%s api_base=%s budget=%s concorrencia=%d",
+                resolved.name, resolved.model, resolved.api_base, resolved.window_token_budget, resolved.max_concurrency)
+    return resolved
 
 
 @click.group()
@@ -449,25 +560,28 @@ def cli():
 @cli.command()
 @click.option("--pdf-dir", required=True, type=click.Path(exists=True, file_okay=False), help="Diretorio com os PDFs a processar.")
 @click.option("--out-dir", required=True, type=click.Path(file_okay=False), help="Diretorio de saida (checkpoints + planilhas).")
+@click.option("--profile", "profile_name", default="local", show_default=True, help="Perfil de deployment em config/profiles (local | cluster).")
 @click.option("--grobid-url", default="http://localhost:8070", show_default=True)
-@click.option("--model", default="ollama_chat/qwen2.5:14b-instruct", show_default=True, help="Identificador LiteLLM do modelo (etapa 2).")
-@click.option("--api-base", default="http://localhost:11434", show_default=True, help="Endpoint do servidor do modelo (Ollama).")
-@click.option("--temperature", default=0.1, show_default=True)
+@click.option("--model", default=None, help="Override do modelo do perfil (identificador LiteLLM).")
+@click.option("--api-base", default=None, help="Override do endpoint do perfil.")
+@click.option("--temperature", default=None, type=float, help="Override da temperatura da extracao A.")
 @click.option("--citation-threshold", default=90.0, show_default=True, help="Limiar (%) de similaridade fuzzy para aceitar uma citacao.")
-@click.option("--grobid-wait-s", default=300, show_default=True, help="Tempo maximo (s) para aguardar o GROBID ficar pronto (o carregamento inicial dos modelos CRF pode demorar).")
-@click.option("--llm-timeout-s", default=900, show_default=True, help="Timeout (s) por chamada ao LLM. Papers geram prompts grandes (milhares de tokens); em GPU com pouca VRAM ou modo hibrido GPU+CPU o prefill pode demorar bastante -- aumente se ver timeouts.")
-@click.option("--min-num-ctx", default=16000, show_default=True, help="Piso minimo de contexto (tokens) pedido ao Ollama via num_ctx. O Ollama trunca o prompt em silencio se num_ctx for pequeno demais para o texto enviado.")
-@click.option("--skip-screening", is_flag=True, help="Pula a etapa 0 (triagem PRISMA) e manda todos os PDFs direto para a extracao -- use se a triagem ja foi feita manualmente e so os PDFs elegiveis estao em --pdf-dir.")
+@click.option("--grobid-wait-s", default=300, show_default=True, help="Tempo maximo (s) para aguardar o GROBID ficar pronto.")
+@click.option("--llm-timeout-s", default=None, type=int, help="Override do timeout (s) por chamada ao LLM.")
+@click.option("--min-num-ctx", default=None, type=int, help="Override do piso de contexto (num_ctx) do perfil.")
+@click.option("--skip-screening", is_flag=True, help="Pula a etapa 0 (triagem PRISMA).")
 @click.option("--force", is_flag=True, help="Reprocessa mesmo que ja exista checkpoint.")
-def run(pdf_dir, out_dir, grobid_url, model, api_base, temperature, citation_threshold, grobid_wait_s, llm_timeout_s, min_num_ctx, skip_screening, force):
+def run(pdf_dir, out_dir, profile_name, grobid_url, model, api_base, temperature, citation_threshold, grobid_wait_s, llm_timeout_s, min_num_ctx, skip_screening, force):
     """Roda o pipeline completo (etapas 0-6) sobre todos os PDFs de --pdf-dir."""
     pdf_dir = Path(pdf_dir)
     out_dir = Path(out_dir)
     screening_dir = out_dir / "screening"
 
+    profile = _resolve_profile(profile_name, model, api_base, temperature, llm_timeout_s, min_num_ctx)
+
     process_pdf_directory(
-        pdf_dir, out_dir, grobid_url, model, api_base, temperature, citation_threshold,
-        grobid_wait_s, llm_timeout_s, min_num_ctx, skip_screening, force,
+        pdf_dir, out_dir, grobid_url, citation_threshold,
+        grobid_wait_s, skip_screening, force, profile,
     )
 
     checkpoint_dir = out_dir / "checkpoints"
@@ -486,17 +600,18 @@ def run(pdf_dir, out_dir, grobid_url, model, api_base, temperature, citation_thr
 @cli.command(name="registry-run")
 @click.option("--registry", required=True, type=click.Path(exists=True, dir_okay=False), help="Caminho do registry.jsonl compartilhado (do SPE/pontodoi).")
 @click.option("--out-dir", required=True, type=click.Path(file_okay=False), help="Diretorio de saida (checkpoints + planilhas).")
+@click.option("--profile", "profile_name", default="local", show_default=True, help="Perfil de deployment em config/profiles (local | cluster).")
 @click.option("--grobid-url", default="http://localhost:8070", show_default=True, help="Endpoint do GROBID.")
-@click.option("--model", default="ollama_chat/qwen2.5:14b-instruct", show_default=True, help="Identificador LiteLLM do modelo (etapa 2).")
-@click.option("--api-base", default="http://localhost:11434", show_default=True, help="Endpoint do servidor do modelo (Ollama).")
-@click.option("--temperature", default=0.1, show_default=True)
+@click.option("--model", default=None, help="Override do modelo do perfil (identificador LiteLLM).")
+@click.option("--api-base", default=None, help="Override do endpoint do perfil.")
+@click.option("--temperature", default=None, type=float, help="Override da temperatura da extracao A.")
 @click.option("--citation-threshold", default=90.0, show_default=True, help="Limiar (%) de similaridade fuzzy para aceitar uma citacao.")
 @click.option("--grobid-wait-s", default=300, show_default=True)
-@click.option("--llm-timeout-s", default=900, show_default=True)
-@click.option("--min-num-ctx", default=16000, show_default=True)
+@click.option("--llm-timeout-s", default=None, type=int, help="Override do timeout (s) por chamada ao LLM.")
+@click.option("--min-num-ctx", default=None, type=int, help="Override do piso de contexto (num_ctx) do perfil.")
 @click.option("--skip-screening", is_flag=True)
 @click.option("--force", is_flag=True, help="Reprocessa mesmo que ja exista checkpoint.")
-def registry_run(registry, out_dir, grobid_url, model, api_base, temperature, citation_threshold, grobid_wait_s, llm_timeout_s, min_num_ctx, skip_screening, force):
+def registry_run(registry, out_dir, profile_name, grobid_url, model, api_base, temperature, citation_threshold, grobid_wait_s, llm_timeout_s, min_num_ctx, skip_screening, force):
     """Roda o pipeline sobre os PDFs pendentes no registry compartilhado
     (fulltext_status=done AND extraction_status in pending/failed), em vez de
     um --pdf-dir fixo. Ao final, atualiza extraction_status de volta no
@@ -511,6 +626,8 @@ def registry_run(registry, out_dir, grobid_url, model, api_base, temperature, ci
     screening_dir = out_dir / "screening"
     checkpoint_dir = out_dir / "checkpoints"
 
+    profile = _resolve_profile(profile_name, model, api_base, temperature, llm_timeout_s, min_num_ctx)
+
     pending = reg.pending_for_extraction(registry_path)
     if not pending:
         logger.info("Nenhum paper pendente no registry (fulltext_status=done + extraction_status pendente/falho).")
@@ -523,8 +640,8 @@ def registry_run(registry, out_dir, grobid_url, model, api_base, temperature, ci
         return
 
     process_pdf_directory(
-        staging_dir, out_dir, grobid_url, model, api_base, temperature, citation_threshold,
-        grobid_wait_s, llm_timeout_s, min_num_ctx, skip_screening, force,
+        staging_dir, out_dir, grobid_url, citation_threshold,
+        grobid_wait_s, skip_screening, force, profile,
     )
 
     checkpoints = load_checkpoints(checkpoint_dir)

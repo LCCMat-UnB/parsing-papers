@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 
+from parsing_papers.grobid_client import GrobidSection, ParsedPaper
 from parsing_papers.pipeline import (
     _load_partial_checkpoint,
     _partial_checkpoint_path,
@@ -57,6 +58,7 @@ class _FailIfCalledExtractor:
     temperature = 0.1
     max_tokens = 8000
     request_timeout = 900
+    min_num_ctx = 16000
 
     def extract(self, paper_id, source_text):
         raise AssertionError("extractor_a.extract() nao deveria ser chamado de novo -- deveria reusar o checkpoint parcial")
@@ -158,15 +160,15 @@ def test_force_clears_stale_partial_checkpoint(tmp_path, monkeypatch):
     stale_extraction_a = PaperExtraction(paper_id="paper_y", records=[_record("Old Stale Model")])
     _save_partial_checkpoint(checkpoint_dir, "paper_y", "texto antigo", stale_extraction_a)
 
-    class _FakeParsedPaper:
-        empty_table_labels: list = []
-
-        def methods_and_results_text(self):
-            return "texto novo do grobid"
-
     class _FakeGrobid:
         def parse_pdf(self, pdf_path, tei_cache_dir):
-            return _FakeParsedPaper()
+            # ParsedPaper real: process_one_pdf agora segmenta o paper em blocos
+            # (segment_paper) em vez de chamar methods_and_results_text() direto.
+            return ParsedPaper(
+                paper_id="paper_y", title="t", abstract="a",
+                sections=[GrobidSection(header="s", text="texto novo do grobid")],
+                tables=[],
+            )
 
     class _FreshExtractorA:
         model = "fake/model-a"
@@ -174,13 +176,17 @@ def test_force_clears_stale_partial_checkpoint(tmp_path, monkeypatch):
         temperature = 0.1
         max_tokens = 8000
         request_timeout = 900
+        min_num_ctx = 16000
 
         def __init__(self):
             self.call_count = 0
 
         def extract(self, paper_id, source_text):
             self.call_count += 1
-            assert source_text == "texto novo do grobid"
+            # o texto renderizado por blocos inclui cabecalhos (TITLE/SECTION);
+            # o que importa e que veio do GROBID novo, nao do checkpoint parcial
+            assert "texto novo do grobid" in source_text
+            assert "texto antigo" not in source_text
             return PaperExtraction(paper_id=paper_id, records=[_record("Fresh Model")])
 
     import parsing_papers.dual_extraction as dual_extraction_module
