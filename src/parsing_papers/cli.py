@@ -46,9 +46,21 @@ def doctor_cmd(
     grobid_url: str = typer.Option(doctor.DEFAULT_GROBID_URL, "--grobid-url"),
     ollama_url: str = typer.Option(doctor.DEFAULT_OLLAMA_URL, "--ollama-url"),
     modelo: str = typer.Option(doctor.MODELO_RECOMENDADO, "--model"),
+    profile_name: str = typer.Option("local", "--profile", help="Perfil a diagnosticar (local | cluster)."),
 ):
-    """Verifica se Docker/GROBID/Ollama/modelo estão prontos para rodar o pipeline."""
-    _rodar_diagnostico(grobid_url, ollama_url, modelo)
+    """Verifica se o ambiente do perfil esta pronto (Docker/GROBID/Ollama no local; endpoint vLLM no cluster)."""
+    if profile_name == "cluster":
+        from .profiles import load_profile
+
+        p = load_profile("cluster")
+        ui.secao("Verificando perfil cluster (vLLM)")
+        with ui.console.status("[primaria]checando endpoint vLLM...[/]", spinner="dots"):
+            resultado = doctor.diagnosticar_cluster(p.api_base, p.model)
+        ui.tabela_diagnostico(resultado.checagens)
+        if not resultado.tudo_ok:
+            ui.erro("Perfil cluster nao esta pronto -- resolva os itens marcados acima.")
+    else:
+        _rodar_diagnostico(grobid_url, ollama_url, modelo)
 
 
 @app.callback(invoke_without_command=True)
@@ -136,23 +148,30 @@ def _fluxo_diagnostico_interativo():
 
 
 def _perguntar_parametros_llm() -> dict:
-    """Monta o perfil de execucao a partir do perfil local + override de modelo
-    perguntado ao usuario. A pergunta de perfil (local/cluster) chega na Task 10;
-    aqui o menu continua funcionando como antes, agora via Profile."""
+    """Monta o perfil de execucao: pergunta local/cluster e, no local, permite
+    trocar o modelo Ollama. Enter aceita os defaults."""
     from dataclasses import replace
 
     from .profiles import load_profile
 
-    modelo = ui.perguntar("Modelo (Ollama)", doctor.MODELO_RECOMENDADO)
+    perfil_nome = ui.perguntar("Perfil de execução (local/cluster)", "local")
+    try:
+        profile = load_profile(perfil_nome)
+    except (FileNotFoundError, ValueError) as e:
+        ui.erro(f"{e} -- usando perfil 'local'.")
+        profile = load_profile("local")
+
+    if profile.name == "local":
+        modelo = ui.perguntar("Modelo (Ollama)", doctor.MODELO_RECOMENDADO)
+        if modelo != doctor.MODELO_RECOMENDADO:
+            profile = replace(profile, model=f"ollama_chat/{modelo}" if not modelo.startswith("ollama_chat/") else modelo)
+
     skip_screening = ui.confirmar(
         "Pular a triagem PRISMA e processar todos os PDFs direto? "
         "(responda 'não' se ainda não filtrou manualmente os PDFs elegíveis)",
         padrao=False,
     )
     force = ui.confirmar("Reprocessar mesmo papers que já têm checkpoint salvo?", padrao=False)
-    profile = load_profile("local")
-    if modelo != doctor.MODELO_RECOMENDADO:
-        profile = replace(profile, model=f"ollama_chat/{modelo}" if not modelo.startswith("ollama_chat/") else modelo)
     return {
         "grobid_url": doctor.DEFAULT_GROBID_URL,
         "citation_threshold": 90.0,

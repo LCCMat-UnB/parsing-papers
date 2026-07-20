@@ -141,6 +141,8 @@ docker compose up -d
 Isso sobe:
 - **GROBID** em `http://localhost:8070` (parsing de PDF -> TEI XML)
 - **Ollama** em `http://localhost:11434` (LLM local para extração)
+- **vLLM** (opcional, perfil `cluster`) em `http://localhost:8000` — não sobe
+  no `up` padrão; suba explicitamente com `docker compose --profile cluster up -d vllm`
 
 Baixe um modelo no Ollama antes de rodar o pipeline. **A escolha do modelo
 depende da VRAM da sua GPU** — um paper científico completo gera prompts de
@@ -164,6 +166,11 @@ Modelos maiores tendem a seguir melhor o schema JSON e citar com mais
 fidelidade, mas só valem a pena se couberem inteiros na VRAM disponível —
 rodar em modo híbrido GPU+CPU com contexto grande é impraticavelmente lento
 para uso em lote. Confira sua VRAM com `nvidia-smi` antes de escolher.
+
+Desde a versão com janelas candidatas, o prompt de extração caiu de 10–32K
+para ~4–6K tokens; o gargalo de `num_ctx` em GPUs de 12GB foi eliminado.
+Para cluster (>18GB), use o perfil `cluster`: `Qwen2.5-32B-Instruct-AWQ` em
+vLLM (GPU ≥24GB; para 18–20GB, `Qwen2.5-14B-Instruct-AWQ`).
 
 ### 2.1 Habilitar GPU no Ollama (Docker + WSL2/Linux)
 
@@ -193,9 +200,18 @@ Rodar o pipeline completo:
 python -m parsing_papers.pipeline run \
   --pdf-dir data/pdfs \
   --out-dir data/extracted \
-  --model ollama_chat/qwen2.5:14b-instruct \
-  --api-base http://localhost:11434 \
+  --profile local \
   --citation-threshold 90
+```
+
+`--profile local|cluster` seleciona o conjunto de parâmetros de
+`config/profiles/<nome>.json` (modelo, endpoint, orçamento de janela,
+concorrência). Flags `--model`, `--api-base`, `--temperature`,
+`--llm-timeout-s`, `--min-num-ctx` agora são overrides individuais do perfil.
+Exemplo no cluster:
+
+```bash
+python -m parsing_papers.pipeline run --pdf-dir data/pdfs --out-dir data/extracted --profile cluster
 ```
 
 Isso gera, em `data/extracted/`:
@@ -235,6 +251,12 @@ Se quiser só reconsolidar as planilhas a partir de checkpoints já existentes
 ```bash
 python -m parsing_papers.pipeline consolidate --out-dir data/extracted
 ```
+
+## Comparando rodadas (benchmark)
+
+`python -m parsing_papers.pipeline compare --run-a <out_dir_baseline> --run-b <out_dir_novo>`
+imprime tokens/prompt, registros, divergências, resoluções do árbitro e tempo
+por paper, lado a lado.
 
 ## Integração com SPE/pontodoi
 

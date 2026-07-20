@@ -191,3 +191,50 @@ def diagnosticar(
             resultado.checagens.append(_modelo_disponivel(modelos, modelo_desejado))
 
     return resultado
+
+
+CONTAINER_VLLM = "parsing_papers_vllm"
+
+
+def _vllm_respondendo(api_base: str) -> tuple[Checagem, list[str]]:
+    """Retorna (checagem, lista_de_modelos_servidos). api_base no formato http://host:8000/v1."""
+    import requests
+
+    try:
+        r = requests.get(f"{api_base.rstrip('/')}/models", timeout=10)
+        r.raise_for_status()
+        modelos = [m["id"] for m in r.json().get("data", [])]
+        return Checagem("vLLM respondendo", True, f"OK em {api_base}."), modelos
+    except requests.RequestException as e:
+        return (
+            Checagem(
+                "vLLM respondendo", False,
+                f"sem resposta em {api_base}: {e}",
+                "docker compose --profile cluster up -d vllm  (a primeira carga baixa ~20GB de modelo; "
+                f"acompanhe com `docker logs {CONTAINER_VLLM}`)",
+            ),
+            [],
+        )
+
+
+def _modelo_servido_vllm(modelos: list[str], modelo_desejado: str) -> Checagem:
+    # cluster.json usa o prefixo LiteLLM "openai/"; o id servido pelo vLLM nao o tem
+    model_id = modelo_desejado.split("/", 1)[1] if modelo_desejado.startswith("openai/") else modelo_desejado
+    if any(m == model_id or model_id in m for m in modelos):
+        return Checagem("Modelo LLM servido", True, f"'{model_id}' disponivel.")
+    return Checagem(
+        "Modelo LLM servido", False,
+        f"'{model_id}' nao esta entre os servidos: {', '.join(modelos) or 'nenhum'}.",
+        "Confira o --model do servico vllm no docker-compose.yml e o campo 'model' de config/profiles/cluster.json.",
+    )
+
+
+def diagnosticar_cluster(api_base: str, modelo_desejado: str) -> DiagnosticoResultado:
+    """Diagnostico do perfil cluster: o servidor vLLM pode ser REMOTO (cluster),
+    entao nao checa Docker/Ollama locais -- so o endpoint e o modelo servido."""
+    resultado = DiagnosticoResultado()
+    vllm_check, modelos = _vllm_respondendo(api_base)
+    resultado.checagens.append(vllm_check)
+    if vllm_check.ok:
+        resultado.checagens.append(_modelo_servido_vllm(modelos, modelo_desejado))
+    return resultado
